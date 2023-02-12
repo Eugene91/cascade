@@ -2,6 +2,7 @@ import socket
 import time
 import numpy as np
 import argparse
+import ipaddress
 
 HEADER = 64
 PORT = 5050
@@ -9,14 +10,12 @@ FORMAT = 'utf-8'
 DISCONNECT_MESSAGE = "!DISCONNECT"
 QBER_ESTIMATE_MESSAGE = 'QBER'
 ERROR_CORRECTION_MESSAGE = 'CORRECT'
-SERVER = "127.0.1.1"
-ADDR = (SERVER,PORT)
 
 class Bob:
-    def __init__(self, key):
+    def __init__(self, key, ip, port):
         # time contains indices of the events.
         self.client = socket.socket(socket.AF_INET,socket.SOCK_STREAM)
-        self.client.connect(ADDR)
+        self.client.connect((ip, port))
         self.key = key
         self.key_size = np.size(key)
         self.qber = 0
@@ -36,12 +35,12 @@ class Bob:
         test_key_indeces=np.random.choice(np.arange(0,np.size(self.key),dtype=np.uint32),test_size,replace=False)
         test_key = self.key[test_key_indeces]
         # Delete sampled keys for QBER test
-        self.key=np.delete(self.key,test_key_indeces)
+        # self.key=np.delete(self.key,test_key_indeces)
         self.key_size = np.size(self.key)
         return (test_key,test_key_indeces)
     
     def send_QBER_test(self,sample_size):
-        # Send 5% of key for a QBER test
+        # Send some portion of the key for a QBER test
         test_size = int(np.size(self.key) * sample_size) 
         (test_key,test_key_indeces) = self.get_part_for_QBER_test(test_size)
         test_key_bytes = test_key.tobytes(order='C')
@@ -51,6 +50,7 @@ class Bob:
         # Size of sent data
         indeces_array_size = int(len(test_key_indeces_bytes))
         data_array_size=int(len(test_key_bytes))
+        
         
         self.client.send(data_array_size.to_bytes(4, 'big'))
         self.client.send(indeces_array_size.to_bytes(4, 'big'))
@@ -77,9 +77,12 @@ class Bob:
         # Calculate a parity of array of bytes
         # 0 for even partity
         # 1 for odd
-        s=0
-        for x in array:
-            s+=self.number_of_ones(x)
+        if np.shape(array) == ():
+            s = self.number_of_ones(array)
+        else:    
+            s=0
+            for x in array:
+                s+=self.number_of_ones(x)
         return s % 2    
             
             
@@ -87,10 +90,6 @@ class Bob:
     def cascade(self, it_number):
         
         self.send_msg(ERROR_CORRECTION_MESSAGE)
-        
-        #if self.qber == 0:
-        #    self.send_QBER_test(sample_size)
-        
         self.client.send(it_number.to_bytes(32, 'big'))
         
         for it in np.arange(0,it_number):
@@ -98,7 +97,11 @@ class Bob:
             # Split the key in chunks of such size  
             # that there is only one error in a chunk
             # on average
-            trun_size = int((2**it)*0.73/self.qber)
+            self.qber = np.around(self.qber,decimals=5)
+            trun_size = int((2**it)*0.73/self.qber/8)
+            if trun_size >= self.key_size:
+                trun_size = int(trun_size /2)
+            print(f'trun_size: {trun_size}')    
             self.client.send(trun_size.to_bytes(32, 'big'))
             # generate a random array of key bytes indeces
             shuffle_pos=np.arange(0,self.key_size,dtype=np.uint32)
@@ -117,10 +120,10 @@ class Bob:
             parities_size = len(chunk_parities.tobytes(order='C'))
             self.alice_parities = np.frombuffer(self.client.recv(parities_size),dtype=np.ubyte)
             
-            
             errors = np.equal(self.alice_parities, chunk_parities)
             errors = np.logical_not(errors)
             erroneous_chunks = np.array(np.argwhere(errors).flatten(),dtype=np.uint16)
+
             
             # Locate error and correct error by cascade algorithm
             self.locate_errors(np.copy(chunks), erroneous_chunks, it)
@@ -141,9 +144,11 @@ class Bob:
 
             
     def binary_search(self, error_chunks, it):
-        
+        # search for errors by dividing the key in half 
+        # and comparing a parity of each halfs
         if len(error_chunks) == 0:
             print(f'No errors were found after {it}-th iteration')
+            return 0
         
         
         elif (np.size(error_chunks[0])) == 1:
@@ -168,24 +173,29 @@ class Bob:
         
         
     def find_bit_in_byte(self, chunk):
-        # find false bit in byte
-        byte = self.key[chunk[0]]
+        # find false bit in a byte of the key defined by chunk.
+        if np.shape(chunk) == ():
+                byte = self.key[chunk]
+        else:
+                byte = self.key[chunk[0]]
         left_4_bits = byte & np.ubyte(0xf0)
         right_4_bits = byte & np.ubyte(0x0f)
         
-        if self.left_partity(right_4_bits, left_4_bits):
+        if self.left_partity(left_4_bits, right_4_bits):
+            # send 0 to Alice to indicate that left part is used
+            #      1 to Alice to indicate that right part is used
             error_part = int(0)
             self.client.send(error_part.to_bytes(4, 'big'))
             left_2_bits = byte & np.ubyte(0xc0)
             right_2_bits = byte & np.ubyte(0x30)
             
-            if self.left_partity(right_2_bits, left_2_bits):
+            if self.left_partity(left_2_bits, right_2_bits):
                 error_part = int(0)
                 self.client.send(error_part.to_bytes(4, 'big'))
                 left_1_bits = byte & np.ubyte(0x80)
                 right_1_bits = byte & np.ubyte(0x40)
                 
-                if self.left_partity(right_1_bits, left_1_bits):
+                if self.left_partity(left_1_bits, right_1_bits):
                     return np.ubyte(0x80)
                 else:
                     return np.ubyte(0x40)
@@ -197,7 +207,7 @@ class Bob:
                 left_1_bits = byte & np.ubyte(0x20)
                 right_1_bits = byte & np.ubyte(0x10)
             
-                if self.left_partity(right_1_bits, left_1_bits):
+                if self.left_partity(left_1_bits, right_1_bits):
                     return np.ubyte(0x20)
                 else:
                     return np.ubyte(0x10)
@@ -209,13 +219,13 @@ class Bob:
             left_2_bits = byte & np.ubyte(0x0c)
             right_2_bits = byte & np.ubyte(0x03)
             
-            if self.left_partity(right_2_bits, left_2_bits):
+            if self.left_partity(left_2_bits, right_2_bits):
                 error_part = int(0)
                 self.client.send(error_part.to_bytes(4, 'big'))
                 left_1_bits = byte & np.ubyte(0x08)
                 right_1_bits = byte & np.ubyte(0x04)
                 
-                if self.left_partity(right_1_bits, left_1_bits):
+                if self.left_partity(left_1_bits, right_1_bits):
                     return np.ubyte(0x08)
                 else:
                     return np.ubyte(0x04)       
@@ -225,7 +235,7 @@ class Bob:
                 left_1_bits = byte & np.ubyte(0x02)
                 right_1_bits = byte & np.ubyte(0x01)
                 
-                if self.left_partity(right_1_bits, left_1_bits):
+                if self.left_partity(left_1_bits, right_1_bits):
                     return np.ubyte(0x02)
                 else:
                     return np.ubyte(0x01)       
@@ -235,16 +245,16 @@ class Bob:
     
     
     
-    def left_partity(self,right_bits, left_bits):
+    def left_partity(self, left_bits, right_bits):
         # returns True if error in left parts
-        # returns False if error in left parts
-        bob_left_parity =  int(self.number_of_ones(right_bits) % 2)
-        bob_right_parity = int(self.number_of_ones(left_bits) % 2)
+        # returns False if error in right parts
+        bob_left_parity =  int(self.number_of_ones(left_bits) % 2)
+        bob_right_parity = int(self.number_of_ones(right_bits) % 2)
         alice_left_parity =  int.from_bytes(self.client.recv(4),'big')
         alice_right_parity =  int.from_bytes(self.client.recv(4),'big')
         if alice_left_parity != bob_left_parity:
             return True
-        else:
+        elif alice_right_parity != bob_right_parity:
             return False
     
     
@@ -255,9 +265,6 @@ class Bob:
         bob_right_parity = int(self.byte_array_parity(self.key[x[1]]))
         alice_left_parity =  int.from_bytes(self.client.recv(4),'big')
         alice_right_parity =  int.from_bytes(self.client.recv(4),'big')
-        # print(f' BR:{bob_right_parity}, BL:{bob_left_parity}')
-        # print(f' AR:{alice_right_parity}, AL:{alice_left_parity}')
-        
         
         if alice_left_parity != bob_left_parity:
             error_part = int(0)
@@ -272,41 +279,66 @@ class Bob:
         
         
         
-        
+def str_2_bool(v):
+    return v.lower() in ("yes", "true", "t", "1")        
     
     
     
     
         
-def start_communication(key,sample_size,it_number):
+def start_communication(key, sample_size, it_number, ip, port, qber_test):
     
-    bob=Bob(key)
-    bob.send_QBER_test(sample_size)
-    print('start cascade')
-    bob.cascade(it_number)
-    bob.send_msg(DISCONNECT_MESSAGE)        
+    if qber_test:
+        bob=Bob(key,ip,port)
+        bob.send_QBER_test(sample_size)
+        bob.send_msg(DISCONNECT_MESSAGE)
+        
+    else:
+        bob=Bob(key,ip,port)
+        bob.send_QBER_test(sample_size)
+        if bob.qber == 0:
+            print('QBER is zero, no reconciliation is needed')
+            bob.send_msg(DISCONNECT_MESSAGE)
+        else:    
+            bob.cascade(it_number)
+            bob.send_msg(DISCONNECT_MESSAGE)
+                
         
 
 def main(args):
     
     try:
-        if args.it_number <= 0:
-            raise ValueError 
+        if args.it <= 0:
+            raise ValueError('Number of iterations should larger than 0.') 
         
-        key=np.load(file=args.key_name)
-        key_size = np.size(key)
-        start_communication(key, args.sample_size, args.it_number)
+        if args.sample_size <=0 or args.sample_size >=1:
+            raise ValueError('sample size should be between 0 and 1.')
+            
+        ip_address = args.ip 
+        ip = ipaddress.ip_address(ip_address)    
+        port = args.port
+        qber_test = str_2_bool(args.qber)
+        
+        if port > 65535 or port < 0 :
+            raise ValueError('invalid port number')
+        
+        key=np.load(file=args.key)
+        start_communication(key, args.sample_size, args.it, ip_address, port, qber_test)
         
     except FileNotFoundError:
-        print("Key file not found")
-    except ValueError:
-        print('Number of iterations should large than 0')
+        print("Key file is not found.")
+    except ValueError as e:
+        print(str(e))
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('-key_name', type=str, default='Bob-key.npy', help='Name of a key file')
-    parser.add_argument('-it_number', type=int, default=2, help='Number of iterations in cascade algorithm')
+    parser.add_argument('-key', type=str, default='Bob-key.npy', help='Name of a key file')
+    parser.add_argument('-qber', type=str, default='False', help='Perform only qber test, default is False')
+    parser.add_argument('-ip', type=str, default='127.0.1.1', help='IP address of the Alice\'s server')
+    parser.add_argument('-port', type=int, default=5050, help='port number of the Alice\'s server')
+    parser.add_argument('-it', type=int, default=10, help='Number of iterations in cascade algorithm')
     parser.add_argument('-sample_size', type=float, default=0.1, help='Portion of key size for QBER estimation, defailt is 10% or 0.1')
+    
     args = parser.parse_args()
     main(args)

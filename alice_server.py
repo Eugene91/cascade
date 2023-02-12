@@ -2,17 +2,16 @@ import socket
 import threading
 import numpy as np
 import argparse
+import ipaddress
 
+#  size in bytes of generic socket message
 HEADER = 64
-PORT = 5050
 
 FORMAT = 'utf-8'
 DISCONNECT_MESSAGE = "!DISCONNECT"
 QBER_ESTIMATE_MESSAGE = 'QBER'
 ERROR_CORRECTION_MESSAGE = 'CORRECT'
 
-key=np.array([])
-key_size = 0
 
     
 
@@ -49,8 +48,6 @@ class Alice:
         conn.send("Ready to receive size of a test buffer".encode(FORMAT))
         size_qber_sample = int.from_bytes(conn.recv(4),'big')
         size_qber_sample_indeces = int.from_bytes(conn.recv(4),'big')
-        #print(f"sample size: {size_qber_sample}")
-        #print(f"sample indeces size: {size_qber_sample_indeces}")
         message = self.prepare_str(f"ready to receive data with {size_qber_sample} bytes and data's indeces of {size_qber_sample_indeces} bytes")
         #conn.send(message)
         
@@ -60,7 +57,7 @@ class Alice:
         self.qber = self.calculate_qber(bob_key=sample,indeces=sample_indeces)
         print(f"qber:{self.qber}")
         conn.send(np.ndarray.tobytes(np.array([self.qber])))
-        self.new_alice_key=np.delete(self.alice_key,sample_indeces)
+        self.new_alice_key= self.alice_key #np.delete(self.alice_key,sample_indeces)
         self.new_key_size = np.size(self.new_alice_key)
         
         
@@ -90,6 +87,9 @@ class Alice:
         it_number = int.from_bytes(conn.recv(32),'big')
         for it in np.arange(0,it_number):
             trun_size = int.from_bytes(conn.recv(32),'big')
+            if trun_size == 0:
+                print(f'error: {trun_size}')
+            print(f'trun_size: {trun_size}')
             bob_chunks=np.zeros(self.new_key_size,dtype=np.uint32)
             bob_chunks=np.array_split(bob_chunks, trun_size)
             alice_chunk_parities = np.zeros(np.size(bob_chunks),dtype=np.ubyte)
@@ -136,54 +136,63 @@ class Alice:
             for err_chunk in error_chunks:
                 if np.size(err_chunk) == 1:
                     self.find_bit_in_byte(conn, err_chunk)
-                else:
+                elif np.size(err_chunk)>1:
                     self.find_bit_in_byte(conn, err_chunk[0])
+                else:
+                    pass
+                    
+        #np.save('corrected-Alice-key', self.new_alice_key, allow_pickle=True, fix_imports=True)         
+                    
                 
     def find_bit_in_byte(self, conn, chunk):
         # find false bit in byte
-        byte = self.new_alice_key[chunk]
+        byte = self.alice_key[chunk]
         left_4_bits = byte & np.ubyte(0xf0)
         right_4_bits = byte & np.ubyte(0x0f)
-        self.exchange_partity(conn, right_4_bits, left_4_bits)
-        which_part = int.from_bytes(conn.recv(4),'big')
+        self.exchange_partity(conn, left_4_bits, right_4_bits)
+        right_part = int.from_bytes(conn.recv(4),'big')
         # True if right part
         # False if left part
-        if which_part:
+        if right_part:
             left_2_bits = byte & np.ubyte(0x0c)
             right_2_bits = byte & np.ubyte(0x03)
-            self.exchange_partity(conn, right_2_bits, left_2_bits)
-            which_part = int.from_bytes(conn.recv(4),'big')
-            if which_part:
+            self.exchange_partity(conn, left_2_bits, right_2_bits)
+            right_part = int.from_bytes(conn.recv(4),'big')
+            if right_part:
                 left_1_bits = byte & np.ubyte(0x02)
                 right_1_bits = byte & np.ubyte(0x01)
+                self.exchange_partity(conn, left_1_bits, right_1_bits)
                 
             else:
                 left_1_bits = byte & np.ubyte(0x08)
                 right_1_bits = byte & np.ubyte(0x04)
-            self.exchange_partity(conn, right_1_bits, left_1_bits)
+                self.exchange_partity(conn, left_1_bits, right_1_bits)
+            
             
         else:
             left_2_bits = byte & np.ubyte(0xc0)
             right_2_bits = byte & np.ubyte(0x30)
-            self.exchange_partity(conn, right_2_bits, left_2_bits)
-            which_part = int.from_bytes(conn.recv(4),'big')
+            self.exchange_partity(conn, left_2_bits, right_2_bits)
+            right_part = int.from_bytes(conn.recv(4),'big')
             
-            if which_part:
-                left_1_bits = byte & np.ubyte(0x80)
-                right_1_bits = byte & np.ubyte(0x40)
-                
-            else:
+            if right_part:
                 left_1_bits = byte & np.ubyte(0x20)
                 right_1_bits = byte & np.ubyte(0x10)
-            self.exchange_partity(conn, right_1_bits, left_1_bits)    
+                self.exchange_partity(conn, left_1_bits, right_1_bits)
+                
+            else:
+                left_1_bits = byte & np.ubyte(0x80)
+                right_1_bits = byte & np.ubyte(0x40)
+                self.exchange_partity(conn, left_1_bits, right_1_bits)
+                
                 
         
         
-    def exchange_partity(self, conn, right_bits, left_bits):
+    def exchange_partity(self, conn, left_bits, right_bits):
         # returns True if error in left parts
         # returns False if error in left parts
-        alice_left_parity =  int(self.number_of_ones(right_bits) % 2)
-        alice_right_parity = int(self.number_of_ones(left_bits) % 2)
+        alice_left_parity =  int(self.number_of_ones(left_bits) % 2)
+        alice_right_parity = int(self.number_of_ones(right_bits) % 2)
         conn.send(alice_left_parity.to_bytes(4, 'big'))
         conn.send(alice_right_parity.to_bytes(4, 'big'))
     
@@ -194,8 +203,8 @@ class Alice:
 
             
             x = np.array(np.array_split(chunks, 2))
-            alice_left_parity = self.byte_array_parity(self.new_alice_key[x[0]])
-            alice_right_parity = self.byte_array_parity(self.new_alice_key[x[1]])
+            alice_left_parity = self.byte_array_parity(self.alice_key[x[0]])
+            alice_right_parity = self.byte_array_parity(self.alice_key[x[1]])
             conn.send(alice_left_parity.to_bytes(4, 'big'))
             conn.send(alice_right_parity.to_bytes(4, 'big'))
             part = int.from_bytes(conn.recv(4),'big') 
@@ -253,13 +262,19 @@ def main(args):
         key=np.load(file=args.key_name)
         key_size = np.size(key)
         
-        ip = "127.0.1.1"
-        port = 5050
-        alice = Alice(key=key,ip=ip,port=port)
+        ip_address = args.ip 
+        ip = ipaddress.ip_address(ip_address)
+        port = args.port 
+        if port > 65535 or port < 0 :
+            raise ValueError('invalid port number')
+        
+        alice = Alice(key=key,ip=ip_address,port=port)
         alice.start_server()
         
     except FileNotFoundError:
         print("Key file not found")
+    except ValueError as e:
+        print(str(e))
         
 
 
@@ -267,5 +282,8 @@ def main(args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('-key_name', type=str, default='Alice-key.npy', help='Name of a key file')
+    parser.add_argument('-ip', type=str, default='127.0.1.1', help='An ip address of the server to run on')
+    parser.add_argument('-port', type=int, default=5050, help='A network port to use')
+    
     args = parser.parse_args()
     main(args)
