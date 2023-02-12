@@ -1,5 +1,5 @@
 # Cascade error correction
-Simple implementation of [cascade reconciliation algorithm](https://www.example.com)  with python numpy and TCP/IP sockets.
+Simple implementation of [cascade reconciliation algorithm](http://dx.doi.org/10.1007/3-540-48285-7_35)  with python numpy and TCP/IP sockets.
 
 # Details
 - Before reconciliation Alice and Bob share a sifted key being a correlated fixed size byte array. 
